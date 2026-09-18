@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily BMSTU StudyBot database backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Europe/Moscow
+Persistent=true
+Unit=studybot-backup.service
+
+[Install]
+WantedBy=timers.target

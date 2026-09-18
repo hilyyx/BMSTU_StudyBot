@@ -27,6 +27,7 @@ class Navigation:
         if section == "main":
             rows = [["📅 Расписание"], ["📚 Домашка", "📋 Стендовое ДЗ"],
                     ["📝 Невыполненное", "✅ Выполненное"],
+                    ["📖 Учебные материалы"],
                     ["🔴 Просроченное", "👤 Мой профиль"]]
             if self.db.draft(user_id):
                 rows.append([RESUME])
@@ -42,6 +43,7 @@ class Navigation:
             "pending": [["✅ Выполненное"], [HOME]],
             "completed": [["📝 Невыполненное"], [HOME]],
             "overdue": [[HOME]],
+            "materials": [[HOME]],
             "group": [["🎟 Приглашения"], [HOME]],
             "invitations": [["🎟 Одно приглашение", "🎟 28 приглашений"], ["👥 Моя группа"], [HOME]],
             "draft_content": [[NEXT], [BACK, CANCEL], [HOME]],

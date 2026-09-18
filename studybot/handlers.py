@@ -13,6 +13,7 @@ from .schedule import MOSCOW
 from .schedule_view import monday_of, schedule_screen
 from .homework import register_homework
 from .navigation import CANCEL, CANCEL_PROFILE, EDIT_PROFILE, HOME, Navigation
+from .materials import materials_keyboard
 
 JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
 
@@ -207,6 +208,17 @@ def create_router(db, config, schedule):
             await message.answer("Этот номер уже занят. Проверь свой номер или обратись к владельцу.")
             return
         await profile(message)
+
+    @router.message(F.text == "📖 Учебные материалы")
+    async def materials(message: Message):
+        if not ready(message):
+            await prompt(message)
+            return
+        await nav.enter(message, message.from_user.id, "materials", "Учебные материалы 👇")
+        await message.answer("<b>📖 Учебные материалы</b>\n\n"
+                             "Выбери предмет — откроется его папка на Яндекс Диске.\n"
+                             "Там можно посмотреть или скачать учебники, конспекты и другие файлы.",
+                             reply_markup=materials_keyboard())
 
     @router.message(F.text == "📅 Расписание")
     async def schedule_menu(message: Message):

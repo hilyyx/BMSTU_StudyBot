@@ -1,0 +1,26 @@
+[Unit]
+Description=BMSTU StudyBot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=studybot
+Group=studybot
+WorkingDirectory=/opt/bmstu-studybot/current
+EnvironmentFile=/etc/bmstu-studybot.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bmstu-studybot/current/.venv/bin/python -m studybot
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+BindReadOnlyPaths=/etc/bmstu-studybot.hosts:/etc/hosts
+ReadWritePaths=/var/lib/bmstu-studybot
+
+[Install]
+WantedBy=multi-user.target

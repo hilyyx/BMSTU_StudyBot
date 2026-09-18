@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up BMSTU StudyBot database
+
+[Service]
+Type=oneshot
+User=studybot
+Group=studybot
+Environment=DATABASE_PATH=/var/lib/bmstu-studybot/bot.sqlite3
+Environment=BACKUP_DIR=/var/backups/bmstu-studybot
+ExecStart=/opt/bmstu-studybot/current/.venv/bin/python /opt/bmstu-studybot/current/deploy/backup.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/bmstu-studybot
