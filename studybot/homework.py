@@ -10,6 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .schedule import MOSCOW, TYPES, academic_week, week_type
 from .stand_homework import lessons_in_week, week_dates
+from .navigation import BACK, NEXT, RESUME
 
 
 def keyboard(rows):
@@ -72,13 +73,14 @@ def homework_card(item, now=None, variant=None):
             details += f"\nТвой вариант — №{variant}"
         if item.get("due_week"):
             details += f"\nНеделя сдачи: {item['due_week']}"
+    deadline = f"{due:%d.%m.%Y}" if item.get("kind") == "stand" else f"{due:%d.%m.%Y %H:%M} (МСК)"
     return (f"<b>{escape(item['subject'])}</b>{details}\n\n{escape(item['description'])}\n\n"
-            f"Срок: {due:%d.%m.%Y %H:%M} (МСК) · {lesson}\n"
+            f"Срок: {deadline} · {lesson}\n"
             f"Сдача: {escape(item['delivery'])}\nВложений: {len(attachments)}\n"
             f"Автор: {escape(author)}\nСтатус: {status}")
 
 
-def register_homework(router, db, config, schedule):
+def register_homework(router, db, config, schedule, nav):
     def registered(user_id):
         user = db.user(user_id)
         return bool(user and user["name"] and user["journal_number"])
@@ -95,6 +97,13 @@ def register_homework(router, db, config, schedule):
         if item["deleted"] and not can_edit(item, user_id):
             await message.answer("Задание удалено.")
             return
+        section = "stand" if item["kind"] == "stand" else "regular"
+        context = nav.homework_lists.get(user_id) if nav.sections.get(user_id) in {"regular", "stand", "overdue", "completed", "pending"} else None
+        if context is None:
+            context = (item["kind"], item["subject"], 0)
+        elif context[0] in {"completed", "pending", "overdue"}:
+            section = context[0]
+        await nav.enter(message, user_id, section, "Карточка ДЗ 👇")
         rows = []
         if not item["deleted"]:
             rows.append([("↩️ Не выполнено" if item["done"] else "✅ Выполнено", f"hw:done:{homework_id}")])
@@ -103,6 +112,9 @@ def register_homework(router, db, config, schedule):
                 rows.append([("Восстановить", f"hw:restore:{homework_id}")])
             else:
                 rows.append([("Изменить", f"hw:edit:{homework_id}"), ("Удалить", f"hw:delete:{homework_id}")])
+        mode, subject, page = context
+        key = subject_key(subject) if subject else "all"
+        rows.append([("↩️ К заданиям", f"hw:list:{mode}:{key}:{page}")])
         if show_attachments and not item["deleted"]:
             for attachment in json.loads(item["attachments"]):
                 if attachment["type"] == "photo":
@@ -113,15 +125,22 @@ def register_homework(router, db, config, schedule):
                              reply_markup=keyboard(rows) if rows else None)
 
     async def show_list(message, user_id, mode="all", subject=None, page=0):
+        section = mode if mode in {"regular", "stand", "overdue", "completed", "pending"} else "regular"
+        await nav.enter(message, user_id, section, "Список заданий 👇")
+        nav.homework_lists[user_id] = (mode, subject, page)
         items = db.homework_list(user_id, subject=subject,
                                  overdue_at=datetime.now(MOSCOW).isoformat() if mode == "overdue" else None,
-                                 deleted=mode == "deleted", kind=mode if mode in {"regular", "stand"} else None)
+                                 deleted=mode == "deleted", kind=mode if mode in {"regular", "stand"} else None,
+                                 done=True if mode == "completed" else False if mode in {"regular", "stand", "pending"} else None)
         if mode == "deleted":
             items = [item for item in items if can_edit(item, user_id)]
         if not items:
-            await message.answer("Заданий пока нет." if mode != "overdue" else "Просроченного ДЗ нет 🎉")
+            await message.answer({"overdue": "Просроченного ДЗ нет 🎉", "completed": "Выполненных заданий пока нет.",
+                                  "pending": "Невыполненного ДЗ нет 🎉", "regular": "Невыполненных обычных заданий нет 🎉",
+                                  "stand": "Невыполненных стендовых заданий нет 🎉"}.get(mode, "Заданий пока нет."))
             return
         page = max(0, min(page, (len(items) - 1) // 8))
+        nav.homework_lists[user_id] = (mode, subject, page)
         rows = []
         for item in items[page * 8:page * 8 + 8]:
             due = datetime.fromisoformat(item["due_at"])
@@ -135,13 +154,16 @@ def register_homework(router, db, config, schedule):
             navigation.append(("→", f"hw:list:{mode}:{key}:{page + 1}"))
         if navigation:
             rows.append(navigation)
-        await message.answer(f"<b>{escape(subject or {'overdue': 'Просроченное ДЗ', 'deleted': 'Удалённые задания', 'stand': 'Стендовое ДЗ', 'regular': 'Обычное ДЗ'}.get(mode, 'Вся домашка'))}</b>\n"
+        subjects_mode = mode if mode in {"stand", "completed", "pending"} else "regular"
+        rows.append([("↩️ К предметам", f"hw:subjects:{subjects_mode}")])
+        await message.answer(f"<b>{escape(subject or {'overdue': 'Просроченное ДЗ', 'deleted': 'Удалённые задания', 'stand': 'Стендовое ДЗ', 'regular': 'Обычное ДЗ', 'completed': 'Выполненное ДЗ', 'pending': 'Невыполненное ДЗ'}.get(mode, 'Вся домашка'))}</b>\n"
                              f"Заданий: {len(items)} · Страница {page + 1}", reply_markup=keyboard(rows))
 
     async def begin(message, user_id, edit_id=None, kind="regular"):
         existing = db.draft(user_id)
         if existing:
-            await message.answer("У тебя уже есть черновик. Продолжи его через /draft или отмени через /cancel.")
+            await message.answer("У тебя уже есть черновик. Продолжим его; для нового задания сначала нажми «Отменить».")
+            await show_draft(message, user_id)
             return
         item = db.homework(edit_id, user_id) if edit_id else None
         if edit_id and (not can_edit(item, user_id) or item["deleted"]):
@@ -173,13 +195,15 @@ def register_homework(router, db, config, schedule):
             await message.answer("Черновика нет. Нажми «➕ Добавить ДЗ».")
             return
         step, token = draft["step"], draft["token"]
+        section = "draft_content" if step == "content" else "draft"
+        await nav.enter(message, user_id, section, "Добавление ДЗ 👇")
         if step == "subject":
             rows = [[(subject, f"hw:subject:{token}:{i}")] for i, subject in enumerate(draft["subjects"])]
-            await message.answer("Выбери предмет. Отменить добавление: /cancel.", reply_markup=keyboard(rows))
+            await message.answer("Выбери предмет:", reply_markup=keyboard(rows))
         elif step == "content":
             instruction = "Прикрепи общий файл с вариантами. Можно добавить описание и другие вложения.\n" if draft.get("kind") == "stand" else "Отправь описание ДЗ, фотографии или файлы. Можно несколькими сообщениями.\n"
             await message.answer(instruction +
-                                 "Когда всё добавишь, отправь /done. Отмена: /cancel.")
+                                 "Когда всё добавишь, нажми «✅ Дальше».")
         elif step == "stand_title":
             await message.answer("Как называется стендовая работа? Например: «ДЗ №1 — Графики функций».")
         elif step == "stand_week":
@@ -239,59 +263,78 @@ def register_homework(router, db, config, schedule):
     @router.message(F.text == "➕ Добавить ДЗ")
     async def add(message: Message):
         if not registered(message.from_user.id):
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
             return
         await begin(message, message.from_user.id)
 
     @router.message(Command("add_stand_homework"))
+    @router.message(F.text == "➕ Добавить стендовое ДЗ")
     async def add_stand(message: Message):
         if not registered(message.from_user.id):
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
             return
         await begin(message, message.from_user.id, kind="stand")
 
     @router.message(Command("draft"))
+    @router.message(F.text == RESUME)
     async def resume(message: Message):
         if registered(message.from_user.id):
             await show_draft(message, message.from_user.id)
         else:
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
+
+    async def show_subjects(message, user_id, kind):
+        await nav.enter(message, user_id, kind, {"stand": "Стендовое ДЗ 👇", "regular": "Обычное ДЗ 👇",
+                                               "completed": "Выполненное ДЗ 👇", "pending": "Невыполненное ДЗ 👇"}[kind])
+        nav.homework_lists.pop(user_id, None)
+        items = db.homework_list(user_id, kind=kind if kind in {"regular", "stand"} else None,
+                                 done=kind == "completed")
+        names = sorted({item["subject"] for item in items})
+        rows = [[(name, f"hw:list:{kind}:{subject_key(name)}:0")] for name in names]
+        rows.append([("Все выполненные" if kind == "completed" else "Все невыполненные", f"hw:list:{kind}:all:0")])
+        if kind in {"regular", "stand"}:
+            rows.append([("Удалённые", "hw:list:deleted:all:0")])
+            rows.append([("➕ Добавить стендовое ДЗ" if kind == "stand" else "➕ Добавить ДЗ", f"hw:new:{kind}")])
+        await message.answer("Выбери предмет:", reply_markup=keyboard(rows))
 
     @router.message(Command("homework"))
     @router.message(F.text == "📚 Домашка")
     async def subjects(message: Message):
         if not registered(message.from_user.id):
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
             return
-        names = db.homework_subjects("regular")
-        rows = [[(name, f"hw:list:regular:{subject_key(name)}:0")] for name in names]
-        rows.append([("Все обычные задания", "hw:list:regular:all:0"), ("Удалённые", "hw:list:deleted:all:0")])
-        await message.answer("Выбери предмет:", reply_markup=keyboard(rows))
+        await show_subjects(message, message.from_user.id, "regular")
 
     @router.message(Command("stand_homework"))
     @router.message(F.text == "📋 Стендовое ДЗ")
     async def stand_subjects(message: Message):
         if not registered(message.from_user.id):
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
             return
-        rows = [[(name, f"hw:list:stand:{subject_key(name)}:0")] for name in db.homework_subjects("stand")]
-        rows.extend([[('Все стендовые задания', 'hw:list:stand:all:0')],
-                     [('➕ Добавить стендовое ДЗ', 'hw:new:stand')]])
-        await message.answer("<b>Стендовое ДЗ</b>\nВыбери предмет или добавь работу:", reply_markup=keyboard(rows))
+        await show_subjects(message, message.from_user.id, "stand")
+
+    @router.message(F.text.in_({"✅ Выполненное", "📝 Невыполненное"}))
+    async def personal_homework(message: Message):
+        if not registered(message.from_user.id):
+            await message.answer("Сначала заверши регистрацию в личном чате.")
+            return
+        await show_subjects(message, message.from_user.id,
+                            "completed" if message.text == "✅ Выполненное" else "pending")
 
     @router.message(Command("overdue"))
     @router.message(F.text == "🔴 Просроченное")
     async def overdue(message: Message):
         if not registered(message.from_user.id):
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
             return
         await show_list(message, message.from_user.id, "overdue")
 
     @router.message(Command("done"))
+    @router.message(F.text == NEXT)
     async def finish_content(message: Message):
         draft = db.draft(message.from_user.id)
         if not registered(message.from_user.id) or not draft or draft["step"] != "content":
-            await message.answer("Команда /done нужна после добавления описания и вложений ДЗ.")
+            await message.answer("Нажми «Дальше» после добавления описания и вложений ДЗ.")
             return
         if not draft["description"] and not draft["attachments"]:
             await message.answer("Сначала отправь описание или хотя бы одно вложение.")
@@ -305,6 +348,26 @@ def register_homework(router, db, config, schedule):
         db.save_draft(message.from_user.id, draft)
         await show_draft(message, message.from_user.id)
 
+    @router.message(F.text == BACK)
+    async def previous_step(message: Message):
+        user_id = message.from_user.id
+        draft = db.draft(user_id)
+        if not registered(user_id) or not draft:
+            await message.answer("Вернуться в разделы можно кнопкой «Главное меню».")
+            return
+        previous = {
+            "stand_title": "subject", "content": "stand_title" if draft.get("kind") == "stand" else "subject",
+            "due": "content", "stand_week": "content", "stand_kind": "stand_week", "stand_pair": "stand_kind",
+            "manual_due": "stand_pair" if draft.get("kind") == "stand" else "due",
+            "delivery": "stand_pair" if draft.get("kind") == "stand" else "due", "confirm": "delivery",
+        }
+        if draft["step"] == "subject":
+            await nav.show(message, user_id, "main", "Черновик сохранён. Главное меню 👇")
+            return
+        draft["step"] = previous[draft["step"]]
+        db.save_draft(user_id, draft)
+        await show_draft(message, user_id)
+
     async def has_draft(message):
         return db.draft(message.from_user.id) is not None
 
@@ -312,12 +375,12 @@ def register_homework(router, db, config, schedule):
     async def draft_input(message: Message):
         user_id = message.from_user.id
         if not registered(user_id):
-            await message.answer("Сначала заверши регистрацию через /start.")
+            await message.answer("Сначала заверши регистрацию в личном чате.")
             return
         draft = db.draft(user_id)
         text = (message.text or message.caption or "").strip()
         if text.startswith("/"):
-            await message.answer("Продолжить черновик: /draft. Закончить вложения: /done. Отменить: /cancel.")
+            await message.answer("Пользуйся кнопками «Дальше», «Назад» и «Отменить».")
             return
         if draft["step"] == "stand_title":
             if not message.text or not 1 <= len(text) <= 100 or len(escape(text)) > 150:
@@ -357,7 +420,7 @@ def register_homework(router, db, config, schedule):
             if attachment:
                 draft["attachments"].append(attachment)
             db.save_draft(user_id, draft)
-            await message.answer("Добавлено. Ещё вложения или /done для выбора срока.")
+            await message.answer("Добавлено. Отправь ещё вложения или нажми «✅ Дальше» для выбора срока.")
             return
         if draft["step"] == "manual_due":
             due = parse_deadline(text)
@@ -388,18 +451,21 @@ def register_homework(router, db, config, schedule):
         message = query.message
         parts = query.data.split(":")
         action = parts[1]
-        if action == "new" and parts[2] == "stand":
-            await begin(message, user_id, kind="stand")
+        if action == "new" and parts[2] in {"regular", "stand"}:
+            await begin(message, user_id, kind=parts[2])
+            return
+        if action == "subjects" and parts[2] in {"regular", "stand", "completed", "pending"}:
+            await show_subjects(message, user_id, parts[2])
             return
         if action in {"subject", "due", "delivery", "publish", "cancel", "stand_kind", "stand_pair",
                       "stand_week", "stand_kind_back", "stand_manual"}:
             draft = db.draft(user_id)
             if not draft or draft["token"] != parts[2]:
-                await message.answer("Эта кнопка устарела. Продолжить текущий черновик: /draft.")
+                await message.answer("Эта кнопка устарела. Нажми «Продолжить черновик» в главном меню.")
                 return
             if action == "cancel":
                 db.clear_draft(user_id)
-                await message.answer("Черновик отменён.")
+                await nav.show(message, user_id, "main", "Черновик отменён. Главное меню 👇")
                 return
             if action == "subject" and draft["step"] == "subject":
                 index = int(parts[3])
@@ -451,18 +517,19 @@ def register_homework(router, db, config, schedule):
                 if homework_id is None:
                     await message.answer("Задание уже изменили или удалили. Отмени черновик и начни заново.")
                     return
-                await message.answer("ДЗ опубликовано для всей группы ✅")
+                section = "stand" if draft.get("kind") == "stand" else "regular"
+                await nav.show(message, user_id, section, "ДЗ опубликовано для всей группы ✅")
                 await show_item(message, homework_id, user_id)
                 return
             else:
-                await message.answer("Этот шаг уже завершён. Продолжить: /draft.")
+                await message.answer("Этот шаг уже завершён. Продолжи черновик кнопками.")
                 return
             db.save_draft(user_id, draft)
             await show_draft(message, user_id)
             return
         if action == "list":
             mode, key, page = parts[2:5]
-            if mode not in {"all", "overdue", "deleted", "regular", "stand"}:
+            if mode not in {"all", "overdue", "deleted", "regular", "stand", "completed", "pending"}:
                 return
             subject = None
             if key != "all":

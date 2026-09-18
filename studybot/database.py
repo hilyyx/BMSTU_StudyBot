@@ -45,6 +45,9 @@ class Database:
                 id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, editor_id INTEGER NOT NULL,
                 action TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS profile_edits (
+                user_id INTEGER PRIMARY KEY, name TEXT
+            );
         """)
         self.ensure_unique_numbers(path)
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(users)")}
@@ -119,6 +122,38 @@ class Database:
         with self.conn:
             self.conn.execute("UPDATE users SET username=? WHERE telegram_id=?", (username, telegram_id))
 
+    def start_profile_edit(self, user_id):
+        with self.conn:
+            self.conn.execute("INSERT INTO profile_edits(user_id) VALUES (?) "
+                              "ON CONFLICT(user_id) DO UPDATE SET name=NULL", (user_id,))
+
+    def profile_edit(self, user_id):
+        return self.conn.execute("SELECT * FROM profile_edits WHERE user_id=?", (user_id,)).fetchone()
+
+    def set_profile_edit_name(self, user_id, name):
+        with self.conn:
+            self.conn.execute("UPDATE profile_edits SET name=? WHERE user_id=?", (name, user_id))
+
+    def cancel_profile_edit(self, user_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM profile_edits WHERE user_id=?", (user_id,))
+
+    def finish_profile_edit(self, user_id, number):
+        edit = self.profile_edit(user_id)
+        if not edit or not edit["name"]:
+            return False
+        try:
+            with self.conn:
+                self.conn.execute("UPDATE users SET name=?,journal_number=? WHERE telegram_id=?",
+                                  (edit["name"], number, user_id))
+                self.conn.execute("DELETE FROM profile_edits WHERE user_id=?", (user_id,))
+        except sqlite3.IntegrityError:
+            if self.conn.execute("SELECT 1 FROM users WHERE journal_number=? AND telegram_id<>?",
+                                 (number, user_id)).fetchone():
+                return False
+            raise
+        return True
+
     def set_number(self, telegram_id, number):
         try:
             with self.conn:
@@ -171,7 +206,7 @@ class Database:
             params = (kind,)
         return [row[0] for row in self.conn.execute(query + " ORDER BY subject", params)]
 
-    def homework_list(self, user_id, subject=None, overdue_at=None, deleted=False, kind=None):
+    def homework_list(self, user_id, subject=None, overdue_at=None, deleted=False, kind=None, done=None):
         query = """SELECT h.*, u.name AS author_name,
             EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?) AS done
             FROM homework h LEFT JOIN users u ON u.telegram_id=h.author_id WHERE h.deleted=?"""
@@ -182,6 +217,9 @@ class Database:
         if subject:
             query += " AND h.subject=?"
             params.append(subject)
+        if done is not None:
+            query += " AND " + ("" if done else "NOT ") + "EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?)"
+            params.append(user_id)
         if overdue_at:
             query += " AND h.due_at<? AND NOT EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?)"
             params.extend([overdue_at, user_id])

@@ -38,7 +38,7 @@ def compact_day(data, day, homework=None, icons_only=False):
             due = datetime.fromisoformat(item["due_at"]).astimezone(MOSCOW)
             if due.date() == day:
                 status = "✅" if item["done"] else "📋"
-                lines.append(f"{status} {due:%H:%M} · <b>{escape(item['subject'])}</b> · {escape(item['title'])}")
+                lines.append(f"{status} <b>{escape(item['subject'])}</b> · {escape(item['title'])}")
     return "\n".join(lines)
 
 
@@ -97,4 +97,5 @@ def schedule_screen(data, updated, stale, day, mode, homework=None):
                 rows.append([InlineKeyboardButton(text=label[:110], callback_data=f"hw:view:{item['id']}")])
             if len(today_homework) > 8:
                 rows.append([InlineKeyboardButton(text="📚 Вся домашка", callback_data="hw:list:all:all:0")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:main")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
