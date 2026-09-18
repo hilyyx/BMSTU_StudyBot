@@ -34,6 +34,8 @@ def homework_for_lesson(homework, lesson, day):
     subject = lesson["discipline"]["fullName"]
     matches = []
     for item in homework:
+        if "kind" in item.keys() and item["kind"] == "stand":
+            continue
         due = datetime.fromisoformat(item["due_at"]).astimezone(MOSCOW)
         if item["subject"] != subject or due.date() != day:
             continue

@@ -19,6 +19,7 @@ MENU = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра")],
     [KeyboardButton(text="🗓 Эта неделя"), KeyboardButton(text="🗓 Следующая неделя")],
     [KeyboardButton(text="📚 Домашка"), KeyboardButton(text="➕ Добавить ДЗ")],
+    [KeyboardButton(text="📋 Стендовое ДЗ")],
     [KeyboardButton(text="🔴 Просроченное")],
     [KeyboardButton(text="👤 Мой профиль")],
 ], resize_keyboard=True)

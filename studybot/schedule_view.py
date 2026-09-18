@@ -31,6 +31,14 @@ def compact_day(data, day, homework=None, icons_only=False):
                 lines.append(status)
     if not lessons:
         lines.append("Занятий нет 🌿")
+    if icons_only and homework is not None:
+        for item in homework:
+            if "kind" not in item.keys() or item["kind"] != "stand":
+                continue
+            due = datetime.fromisoformat(item["due_at"]).astimezone(MOSCOW)
+            if due.date() == day:
+                status = "✅" if item["done"] else "📋"
+                lines.append(f"{status} {due:%H:%M} · <b>{escape(item['subject'])}</b> · {escape(item['title'])}")
     return "\n".join(lines)
 
 
@@ -72,12 +80,20 @@ def schedule_screen(data, updated, stale, day, mode, homework=None):
                               if datetime.fromisoformat(item["due_at"]).astimezone(MOSCOW).date() == day]
             linked = {item["id"] for lesson in lessons_on(data, day)
                       for item in homework_for_lesson(homework, lesson, day)}
-            other = [item for item in today_homework if item["id"] not in linked]
+            stand = [item for item in today_homework if "kind" in item.keys() and item["kind"] == "stand"]
+            other = [item for item in today_homework if item["id"] not in linked
+                     and not ("kind" in item.keys() and item["kind"] == "stand")]
+            if stand:
+                text += f"\n\n<b>📋 Стендовое ДЗ к сдаче</b>\nРабот: {len(stand)} · "
+                text += f"не выполнено: {sum(not item['done'] for item in stand)}"
             if other:
                 text += f"\n\n<b>Другие дедлайны на этот день</b>\nЗаданий: {len(other)} · "
                 text += f"не выполнено: {sum(not item['done'] for item in other)}"
             for item in today_homework[:8]:
-                label = f"{'✅' if item['done'] else '📝'} ДЗ · {item['subject']} · {item['description'][:30]}"
+                is_stand = "kind" in item.keys() and item["kind"] == "stand"
+                icon = "✅" if item["done"] else ("📋" if is_stand else "📝")
+                title = item["title"] if is_stand else item["description"]
+                label = f"{icon} ДЗ · {item['subject']} · {title[:30]}"
                 rows.append([InlineKeyboardButton(text=label[:110], callback_data=f"hw:view:{item['id']}")])
             if len(today_homework) > 8:
                 rows.append([InlineKeyboardButton(text="📚 Вся домашка", callback_data="hw:list:all:all:0")])

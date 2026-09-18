@@ -53,6 +53,12 @@ class Database:
                 self.conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
         with self.conn:
             self.conn.execute("UPDATE users SET role='student' WHERE role='moderator'")
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(homework)")}
+        with self.conn:
+            for name, definition in (("kind", "TEXT NOT NULL DEFAULT 'regular'"),
+                                     ("title", "TEXT NOT NULL DEFAULT ''"), ("due_week", "INTEGER")):
+                if name not in columns:
+                    self.conn.execute(f"ALTER TABLE homework ADD COLUMN {name} {definition}")
 
     def ensure_unique_numbers(self, path):
         duplicates = self.conn.execute("""
@@ -157,14 +163,22 @@ class Database:
             FROM homework h LEFT JOIN users u ON u.telegram_id=h.author_id WHERE h.id=?
         """, (user_id, homework_id)).fetchone()
 
-    def homework_subjects(self):
-        return [row[0] for row in self.conn.execute("SELECT DISTINCT subject FROM homework WHERE deleted=0 ORDER BY subject")]
+    def homework_subjects(self, kind=None):
+        query = "SELECT DISTINCT subject FROM homework WHERE deleted=0"
+        params = ()
+        if kind:
+            query += " AND kind=?"
+            params = (kind,)
+        return [row[0] for row in self.conn.execute(query + " ORDER BY subject", params)]
 
-    def homework_list(self, user_id, subject=None, overdue_at=None, deleted=False):
+    def homework_list(self, user_id, subject=None, overdue_at=None, deleted=False, kind=None):
         query = """SELECT h.*, u.name AS author_name,
             EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?) AS done
             FROM homework h LEFT JOIN users u ON u.telegram_id=h.author_id WHERE h.deleted=?"""
         params = [user_id, int(deleted)]
+        if kind:
+            query += " AND h.kind=?"
+            params.append(kind)
         if subject:
             query += " AND h.subject=?"
             params.append(subject)
@@ -179,17 +193,18 @@ class Database:
             if not draft or draft.get("step") != "confirm" or draft["token"] != token:
                 return None
             values = (draft["subject"], draft["description"], json.dumps(draft["attachments"]),
-                      draft["due_at"], draft["lesson_type"], draft["delivery"])
+                      draft["due_at"], draft["lesson_type"], draft["delivery"],
+                      draft.get("kind", "regular"), draft.get("title", ""), draft.get("due_week"))
             homework_id = draft.get("edit_id")
             if homework_id:
                 cursor = self.conn.execute("""UPDATE homework SET subject=?,description=?,attachments=?,due_at=?,
-                    lesson_type=?,delivery=?,version=version+1 WHERE id=? AND version=? AND deleted=0
+                    lesson_type=?,delivery=?,kind=?,title=?,due_week=?,version=version+1 WHERE id=? AND version=? AND deleted=0
                     AND (author_id=? OR ?=?)""", values + (homework_id, draft["version"], user_id, user_id, owner_id))
                 if cursor.rowcount != 1:
                     return None
             else:
                 cursor = self.conn.execute("""INSERT INTO homework(subject,description,attachments,due_at,lesson_type,
-                    delivery,author_id) VALUES (?,?,?,?,?,?,?)""", values + (user_id,))
+                    delivery,kind,title,due_week,author_id) VALUES (?,?,?,?,?,?,?,?,?,?)""", values + (user_id,))
                 homework_id = cursor.lastrowid
             self.conn.execute("INSERT INTO homework_history(homework_id,editor_id,action,payload) VALUES (?,?,?,?)",
                               (homework_id, user_id, "edit" if draft.get("edit_id") else "create", json.dumps(draft)))

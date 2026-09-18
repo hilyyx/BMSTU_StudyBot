@@ -30,6 +30,8 @@ async def main():
                 BotCommand(command="schedule", description="Расписание на сегодня"),
                 BotCommand(command="homework", description="Домашка по предметам"),
                 BotCommand(command="add_homework", description="Добавить ДЗ"),
+                BotCommand(command="stand_homework", description="Стендовое ДЗ"),
+                BotCommand(command="add_stand_homework", description="Добавить стендовое ДЗ"),
                 BotCommand(command="overdue", description="Просроченное ДЗ"),
                 BotCommand(command="draft", description="Продолжить черновик ДЗ"),
                 BotCommand(command="cancel", description="Отменить черновик ДЗ"),
