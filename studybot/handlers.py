@@ -1,13 +1,16 @@
 import time
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from .schedule import MOSCOW, render_day
+
+JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
 
 MENU = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра")],
@@ -53,6 +56,25 @@ def create_router(db, config, schedule):
     router.message.filter(F.chat.type == ChatType.PRIVATE)
     attempts = {}
 
+    @router.message.middleware()
+    async def save_username(handler, message, data):
+        user = db.user(message.from_user.id)
+        if user:
+            db.set_username(message.from_user.id, message.from_user.username)
+        try:
+            return await handler(message, data)
+        finally:
+            if not user:
+                db.set_username(message.from_user.id, message.from_user.username)
+
+    def menu(message):
+        if message.from_user.id != config.owner_id:
+            return MENU
+        return ReplyKeyboardMarkup(
+            keyboard=MENU.keyboard + [[KeyboardButton(text="👥 Моя группа")]],
+            resize_keyboard=True,
+        )
+
     async def prompt(message):
         user = db.user(message.from_user.id)
         if not user:
@@ -63,10 +85,14 @@ def create_router(db, config, schedule):
         elif not user["name"]:
             await message.answer("Как тебя зовут? Введи имя и фамилию.", reply_markup=ReplyKeyboardRemove())
         elif not user["journal_number"]:
-            await message.answer("Введи свой номер в журнале: от 1 до 30. Это также номер варианта стендового ДЗ.",
-                                 reply_markup=ReplyKeyboardRemove())
+            await message.answer_photo(
+                photo=FSInputFile(JOURNAL_PHOTO),
+                caption="Найди себя на фото журнала и введи номер своей строки: от 1 до 30. "
+                        "Это также номер варианта стендового ДЗ.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
         else:
-            await message.answer(f"Привет, {escape(user['name'])}! Выбирай расписание 👇", reply_markup=MENU)
+            await message.answer(f"Привет, {escape(user['name'])}! Выбирай расписание 👇", reply_markup=menu(message))
 
     def ready(message):
         user = db.user(message.from_user.id)
@@ -106,8 +132,35 @@ def create_router(db, config, schedule):
         user = db.user(message.from_user.id)
         await message.answer(f"<b>Твой профиль</b>\nИмя: {escape(user['name'])}\n"
                              f"Группа: ИУ7-13Б\nНомер в журнале / вариант: {user['journal_number']}\n"
-                             f"Роль: {'владелец' if user['role'] == 'owner' else 'модератор'}\n\n"
-                             "Чтобы изменить данные, отправь /edit_profile.", reply_markup=MENU)
+                             f"Роль: {'владелец' if user['role'] == 'owner' else 'студент'}\n\n"
+                             "Чтобы изменить данные, отправь /edit_profile.", reply_markup=menu(message))
+
+    @router.message(Command("group"))
+    @router.message(F.text == "👥 Моя группа")
+    async def group(message: Message):
+        if message.from_user.id != config.owner_id:
+            await message.answer("Список группы доступен только владельцу.")
+            return
+        members = db.group_members()
+        complete = sum(bool(user["name"] and user["journal_number"]) for user in members)
+        await message.answer(
+            f"<b>Группа ИУ7-13Б</b>\nРегистрацию завершили: {complete}\n"
+            f"Не завершили: {len(members) - complete}\nВсего аккаунтов: {len(members)}",
+            reply_markup=menu(message),
+        )
+        if not members:
+            await message.answer("Пока никто не зарегистрировался.")
+            return
+        entries = []
+        for user in members:
+            number = user["journal_number"] or "—"
+            name = escape(user["name"] or "Имя не указано")
+            role = "владелец" if user["telegram_id"] == config.owner_id else "студент"
+            status = "" if user["name"] and user["journal_number"] else "\nРегистрация не завершена"
+            username = f"@{escape(user['username'])}" if user["username"] else "не указан"
+            entries.append(f"<b>№ {number} · {name}</b>\nUsername: {username}\n"
+                           f"ID: <code>{user['telegram_id']}</code> · {role}{status}")
+        await send_day(message, "\n\n".join(entries))
 
     @router.message(Command("edit_profile"))
     async def edit_profile(message: Message):
@@ -129,14 +182,14 @@ def create_router(db, config, schedule):
             data, updated, stale = await schedule.get()
         except RuntimeError:
             await message.answer("Сайт расписания сейчас недоступен, а сохранённой копии ещё нет. Попробуй позже.",
-                                 reply_markup=MENU)
+                                 reply_markup=menu(message))
             return
         today = datetime.now(MOSCOW).date()
         days = schedule_dates(message.text, today)
         header = f"<b>Расписание {escape(data['title'])}</b>\nОбновлено: {datetime.fromisoformat(updated):%d.%m %H:%M} (МСК)"
         if stale:
             header += "\n⚠️ Не удалось обновить. Показываю сохранённую копию."
-        await message.answer(header, reply_markup=MENU)
+        await message.answer(header, reply_markup=menu(message))
         for day in days:
             await send_day(message, render_day(data, day))
 
@@ -172,10 +225,13 @@ def create_router(db, config, schedule):
             if number is None:
                 await message.answer("Номер должен быть целым числом от 1 до 30.")
                 return
-            db.set_number(user_id, number)
-            await message.answer("Регистрация завершена ✅", reply_markup=MENU)
+            if not db.set_number(user_id, number):
+                await message.answer("Этот номер в журнале уже занят. Проверь свой номер. "
+                                     "Если его занял другой студент по ошибке, обратись к владельцу бота.")
+                return
+            await message.answer("Регистрация завершена ✅", reply_markup=menu(message))
             await prompt(message)
         else:
-            await message.answer("Выбирай действие в меню 👇", reply_markup=MENU)
+            await message.answer("Выбирай действие в меню 👇", reply_markup=menu(message))
 
     return router
