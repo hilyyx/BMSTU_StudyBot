@@ -28,6 +28,11 @@ async def main():
             await bot.set_my_commands([
                 BotCommand(command="start", description="Начать / открыть меню"),
                 BotCommand(command="schedule", description="Расписание на сегодня"),
+                BotCommand(command="homework", description="Домашка по предметам"),
+                BotCommand(command="add_homework", description="Добавить ДЗ"),
+                BotCommand(command="overdue", description="Просроченное ДЗ"),
+                BotCommand(command="draft", description="Продолжить черновик ДЗ"),
+                BotCommand(command="cancel", description="Отменить черновик ДЗ"),
                 BotCommand(command="profile", description="Мой профиль"),
                 BotCommand(command="edit_profile", description="Изменить имя и номер в журнале"),
             ])

@@ -1,20 +1,25 @@
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
-from .schedule import MOSCOW, render_day
+from .schedule import MOSCOW
+from .schedule_view import monday_of, schedule_screen
+from .homework import register_homework
 
 JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
 
 MENU = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра")],
     [KeyboardButton(text="🗓 Эта неделя"), KeyboardButton(text="🗓 Следующая неделя")],
+    [KeyboardButton(text="📚 Домашка"), KeyboardButton(text="➕ Добавить ДЗ")],
+    [KeyboardButton(text="🔴 Просроченное")],
     [KeyboardButton(text="👤 Мой профиль")],
 ], resize_keyboard=True)
 
@@ -25,18 +30,6 @@ def parse_number(text, maximum):
         if 1 <= number <= maximum:
             return number
     return None
-
-
-def schedule_dates(button, today):
-    if button == "📅 Завтра":
-        return [today + timedelta(days=1)]
-    if button not in {"🗓 Эта неделя", "🗓 Следующая неделя"}:
-        return [today]
-
-    monday = today - timedelta(days=today.weekday())
-    if button == "🗓 Следующая неделя":
-        monday += timedelta(days=7)
-    return [monday + timedelta(days=i) for i in range(7)]
 
 
 async def send_day(message, text):
@@ -79,7 +72,7 @@ def create_router(db, config, schedule):
         user = db.user(message.from_user.id)
         if not user:
             await message.answer("Привет! Я учебный бот группы ИУ7-13Б \n"
-                                 "Здесь можно смотреть расписание. Позже появится домашка.\n\n"
+                                 "Здесь можно смотреть расписание и домашку.\n\n"
                                  "Отправь персональный код приглашения, полученный у владельца бота.",
                                  reply_markup=ReplyKeyboardRemove())
         elif not user["name"]:
@@ -92,7 +85,7 @@ def create_router(db, config, schedule):
                 reply_markup=ReplyKeyboardRemove(),
             )
         else:
-            await message.answer(f"Привет, {escape(user['name'])}! Выбирай расписание 👇", reply_markup=menu(message))
+            await message.answer(f"Привет, {escape(user['name'])}! Выбирай действие 👇", reply_markup=menu(message))
 
     def ready(message):
         user = db.user(message.from_user.id)
@@ -101,6 +94,9 @@ def create_router(db, config, schedule):
     @router.message(CommandStart())
     @router.message(Command("cancel"))
     async def start(message: Message):
+        if message.text and message.text.split()[0].split('@')[0] == "/cancel":
+            db.clear_draft(message.from_user.id)
+            await message.answer("Черновик ДЗ отменён.")
         if message.from_user.id == config.owner_id:
             db.add_owner(config.owner_id)
         await prompt(message)
@@ -177,7 +173,6 @@ def create_router(db, config, schedule):
         if not ready(message):
             await prompt(message)
             return
-        await message.answer("Загружаю расписание…")
         try:
             data, updated, stale = await schedule.get()
         except RuntimeError:
@@ -185,13 +180,48 @@ def create_router(db, config, schedule):
                                  reply_markup=menu(message))
             return
         today = datetime.now(MOSCOW).date()
-        days = schedule_dates(message.text, today)
-        header = f"<b>Расписание {escape(data['title'])}</b>\nОбновлено: {datetime.fromisoformat(updated):%d.%m %H:%M} (МСК)"
-        if stale:
-            header += "\n⚠️ Не удалось обновить. Показываю сохранённую копию."
-        await message.answer(header, reply_markup=menu(message))
-        for day in days:
-            await send_day(message, render_day(data, day))
+        mode = "week" if message.text in {"🗓 Эта неделя", "🗓 Следующая неделя"} else "day"
+        day = monday_of(today) if mode == "week" else today
+        if message.text == "📅 Завтра":
+            day += timedelta(days=1)
+        elif message.text == "🗓 Следующая неделя":
+            day += timedelta(days=7)
+        homework = db.homework_list(message.from_user.id)
+        text, buttons = schedule_screen(data, updated, stale, day, mode, homework)
+        await message.answer(text, reply_markup=buttons)
+
+    @router.callback_query(F.data.startswith("schedule:"))
+    async def navigate_schedule(query):
+        user = db.user(query.from_user.id)
+        if not user or not user["name"] or not user["journal_number"]:
+            await query.answer("Сначала заверши регистрацию.", show_alert=True)
+            return
+        if not query.message or query.message.chat.type != ChatType.PRIVATE:
+            await query.answer()
+            return
+        try:
+            _, mode, raw_day = query.data.split(":")
+            day = date.fromisoformat(raw_day)
+            if mode not in {"day", "week"}:
+                raise ValueError
+        except ValueError:
+            await query.answer("Кнопка недоступна.")
+            return
+        await query.answer()
+        try:
+            data, updated, stale = await schedule.get()
+        except RuntimeError:
+            await query.message.answer("Не удалось загрузить расписание. Попробуй позже.")
+            return
+        homework = db.homework_list(query.from_user.id)
+        text, buttons = schedule_screen(data, updated, stale, day, mode, homework)
+        try:
+            await query.message.edit_text(text, reply_markup=buttons)
+        except TelegramBadRequest as error:
+            if "message is not modified" not in error.message:
+                raise
+
+    register_homework(router, db, config, schedule)
 
     @router.message()
     async def onboarding(message: Message):

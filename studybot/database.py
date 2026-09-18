@@ -1,4 +1,5 @@
 import hashlib
+import json
 import secrets
 import sqlite3
 from contextlib import closing
@@ -26,6 +27,23 @@ class Database:
             );
             CREATE TABLE IF NOT EXISTS schedule_cache (
                 group_uuid TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS homework (
+                id INTEGER PRIMARY KEY, subject TEXT NOT NULL, description TEXT NOT NULL,
+                attachments TEXT NOT NULL, due_at TEXT NOT NULL, lesson_type TEXT NOT NULL,
+                delivery TEXT NOT NULL, author_id INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS homework_done (
+                homework_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+                PRIMARY KEY(homework_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS homework_drafts (
+                user_id INTEGER PRIMARY KEY, payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS homework_history (
+                id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, editor_id INTEGER NOT NULL,
+                action TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
         """)
         self.ensure_unique_numbers(path)
@@ -118,3 +136,84 @@ class Database:
 
     def close(self):
         self.conn.close()
+
+    def draft(self, user_id):
+        row = self.conn.execute("SELECT payload FROM homework_drafts WHERE user_id=?", (user_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_draft(self, user_id, draft):
+        with self.conn:
+            self.conn.execute("INSERT INTO homework_drafts VALUES (?,?) ON CONFLICT(user_id) "
+                              "DO UPDATE SET payload=excluded.payload", (user_id, json.dumps(draft, ensure_ascii=False)))
+
+    def clear_draft(self, user_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM homework_drafts WHERE user_id=?", (user_id,))
+
+    def homework(self, homework_id, user_id):
+        return self.conn.execute("""
+            SELECT h.*, u.name AS author_name,
+                EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?) AS done
+            FROM homework h LEFT JOIN users u ON u.telegram_id=h.author_id WHERE h.id=?
+        """, (user_id, homework_id)).fetchone()
+
+    def homework_subjects(self):
+        return [row[0] for row in self.conn.execute("SELECT DISTINCT subject FROM homework WHERE deleted=0 ORDER BY subject")]
+
+    def homework_list(self, user_id, subject=None, overdue_at=None, deleted=False):
+        query = """SELECT h.*, u.name AS author_name,
+            EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?) AS done
+            FROM homework h LEFT JOIN users u ON u.telegram_id=h.author_id WHERE h.deleted=?"""
+        params = [user_id, int(deleted)]
+        if subject:
+            query += " AND h.subject=?"
+            params.append(subject)
+        if overdue_at:
+            query += " AND h.due_at<? AND NOT EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?)"
+            params.extend([overdue_at, user_id])
+        return self.conn.execute(query + " ORDER BY h.due_at,h.id", params).fetchall()
+
+    def publish_homework(self, user_id, owner_id, token):
+        with self.conn:
+            draft = self.draft(user_id)
+            if not draft or draft.get("step") != "confirm" or draft["token"] != token:
+                return None
+            values = (draft["subject"], draft["description"], json.dumps(draft["attachments"]),
+                      draft["due_at"], draft["lesson_type"], draft["delivery"])
+            homework_id = draft.get("edit_id")
+            if homework_id:
+                cursor = self.conn.execute("""UPDATE homework SET subject=?,description=?,attachments=?,due_at=?,
+                    lesson_type=?,delivery=?,version=version+1 WHERE id=? AND version=? AND deleted=0
+                    AND (author_id=? OR ?=?)""", values + (homework_id, draft["version"], user_id, user_id, owner_id))
+                if cursor.rowcount != 1:
+                    return None
+            else:
+                cursor = self.conn.execute("""INSERT INTO homework(subject,description,attachments,due_at,lesson_type,
+                    delivery,author_id) VALUES (?,?,?,?,?,?,?)""", values + (user_id,))
+                homework_id = cursor.lastrowid
+            self.conn.execute("INSERT INTO homework_history(homework_id,editor_id,action,payload) VALUES (?,?,?,?)",
+                              (homework_id, user_id, "edit" if draft.get("edit_id") else "create", json.dumps(draft)))
+            self.conn.execute("DELETE FROM homework_drafts WHERE user_id=?", (user_id,))
+        return homework_id
+
+    def set_homework_deleted(self, homework_id, user_id, owner_id, deleted):
+        with self.conn:
+            cursor = self.conn.execute("UPDATE homework SET deleted=?,version=version+1 WHERE id=? "
+                                       "AND deleted<>? AND (author_id=? OR ?=?)",
+                                       (int(deleted), homework_id, int(deleted), user_id, user_id, owner_id))
+            if cursor.rowcount != 1:
+                return False
+            self.conn.execute("INSERT INTO homework_history(homework_id,editor_id,action,payload) VALUES (?,?,?,?)",
+                              (homework_id, user_id, "delete" if deleted else "restore", "{}"))
+        return True
+
+    def toggle_homework_done(self, homework_id, user_id):
+        with self.conn:
+            item = self.homework(homework_id, user_id)
+            if not item or item["deleted"]:
+                return False
+            if item["done"]:
+                self.conn.execute("DELETE FROM homework_done WHERE homework_id=? AND user_id=?", (homework_id, user_id))
+            else:
+                self.conn.execute("INSERT INTO homework_done VALUES (?,?)", (homework_id, user_id))
+        return True

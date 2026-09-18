@@ -24,18 +24,50 @@ def week_type(day: date):
     return "ch" if academic_week(day) % 2 == 1 else "zn"
 
 
-def render_day(data, day):
+def lessons_on(data, day):
+    lessons = [item for item in data["schedule"] if item["day"] == day.isoweekday()
+               and item["week"] in {"all", week_type(day)}]
+    return sorted(lessons, key=lambda item: (item["startTime"], item["time"]))
+
+
+def homework_for_lesson(homework, lesson, day):
+    subject = lesson["discipline"]["fullName"]
+    matches = []
+    for item in homework:
+        due = datetime.fromisoformat(item["due_at"]).astimezone(MOSCOW)
+        if item["subject"] != subject or due.date() != day:
+            continue
+        if (item["lesson_type"] == "manual" and lesson["discipline"].get("actType") != "lecture") or (
+            item["lesson_type"] == lesson["discipline"].get("actType")
+            and due.strftime("%H:%M") == lesson["startTime"]
+        ):
+            matches.append(item)
+    return matches
+
+
+def homework_status(items):
+    if not items:
+        return ""
+    completed = sum(bool(item["done"]) for item in items)
+    if completed == len(items):
+        return f"ДЗ: {len(items)} · всё выполнено ✅"
+    return f"ДЗ: {len(items)} · осталось выполнить: {len(items) - completed} 📝"
+
+
+def render_day(data, day, homework=None):
     current = week_type(day)
     lines = [f"<b>{DAYS[day.weekday()]}, {day:%d.%m.%Y}</b>"]
     lines.append(f"Учебная неделя {academic_week(day)} · {WEEKS[current]}")
-    lessons = [item for item in data["schedule"] if item["day"] == day.isoweekday()
-               and item["week"] in {"all", current}]
-    lessons.sort(key=lambda item: (item["startTime"], item["time"]))
+    lessons = lessons_on(data, day)
     for item in lessons:
         discipline = item["discipline"]
         label = TYPES.get(discipline.get("actType"), "Занятие")
         lines.append(f"\n<b>{escape(item['startTime'])}–{escape(item['endTime'])}</b> · {escape(label)}")
-        lines.append(escape(discipline["fullName"]))
+        lines.append(f"<b>{escape(discipline['fullName'])}</b>")
+        if homework is not None:
+            status = homework_status(homework_for_lesson(homework, item, day))
+            if status:
+                lines.append(status)
         rooms = ", ".join(room["name"] for room in item.get("audiences", []) if room.get("name"))
         if rooms:
             lines.append(f"Аудитория: {escape(rooms)}")
