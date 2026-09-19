@@ -1,0 +1,6 @@
+Generated with the built-in image_gen tool.
+
+Generate a square 1024x1024 minimalist Telegram bot avatar for a Bauman Moscow technical university study bot. Use the attached reference only for stylistic inspiration: a very simple black cat head on white, two white circular eyes, with a soft blurry cyan/violet neon aura along the silhouette. Create an original polished icon, not a copy. Center a single friendly near-black cat head with two pointed ears and small white circular eyes, add a very simple black academic mortarboard with a tiny cyan tassel as the university reference, and a small crisp glowing cyan programming symbol </> below the eyes on the lower face. Almost white cool background, restrained cyan and purple soft bloom concentrated around silhouette, ample empty space. Flat minimal silhouette with atmospheric soft edges, high visual legibility at 64 pixels, all important elements within central 65 percent for circular avatar crop. No wordmarks, no university crest, no letters, no watermark, no additional objects. Style: minimalist neon graphic logo, close to the supplied blurry black cat example but recognizable academic programmer mascot.
+
+bot_avatar.png is the original generated image.
+bot_avatar.jpg is the JPEG export for the Telegram Bot API.

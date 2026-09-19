@@ -28,11 +28,12 @@ class Navigation:
             rows = [["📅 Расписание"], ["📚 Домашка", "📋 Стендовое ДЗ"],
                     ["📝 Невыполненное", "✅ Выполненное"],
                     ["📖 Учебные материалы"],
-                    ["🔴 Просроченное", "👤 Мой профиль"]]
+                    ["🔴 Просроченное", "👤 Мой профиль"],
+                    ["💡 Предложения и идеи"]]
             if self.db.draft(user_id):
                 rows.append([RESUME])
             if user_id == self.owner_id:
-                rows.append(["👥 Моя группа"])
+                rows.append(["👥 Моя группа", "📥 Предложения"])
             return reply_keyboard(rows)
         rows = {
             "profile": [[EDIT_PROFILE], [HOME]],
@@ -44,6 +45,9 @@ class Navigation:
             "completed": [["📝 Невыполненное"], [HOME]],
             "overdue": [[HOME]],
             "materials": [[HOME]],
+            "feedback": [["✍️ Отправить предложение"], [HOME]],
+            "feedback_input": [[CANCEL], [HOME]],
+            "feedback_inbox": [["💡 Предложения и идеи"], [HOME]],
             "group": [["🎟 Приглашения"], [HOME]],
             "invitations": [["🎟 Одно приглашение", "🎟 28 приглашений"], ["👥 Моя группа"], [HOME]],
             "draft_content": [[NEXT], [BACK, CANCEL], [HOME]],
@@ -54,6 +58,8 @@ class Navigation:
     async def show(self, message, user_id, section, text):
         if section != "edit_profile":
             self.db.cancel_profile_edit(user_id)
+        if section != "feedback_input":
+            self.db.cancel_feedback(user_id)
         self.sections[user_id] = section
         await message.answer(text, reply_markup=self.keyboard(section, user_id))
 

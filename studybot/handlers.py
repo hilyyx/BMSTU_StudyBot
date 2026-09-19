@@ -6,8 +6,9 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import FSInputFile, Message, ReplyKeyboardRemove
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
+                           InlineKeyboardMarkup, Message, ReplyKeyboardRemove)
 
 from .schedule import MOSCOW
 from .schedule_view import monday_of, schedule_screen
@@ -16,6 +17,16 @@ from .navigation import CANCEL, CANCEL_PROFILE, EDIT_PROFILE, HOME, Navigation
 from .materials import materials_keyboard
 
 JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
+WELCOME_IMAGE = Path(__file__).parent / "assets" / "welcome.png"
+WELCOME_TEXT = (
+    "<b>Привет! Учимся в Бауманке вместе 🎓</b>\n\n"
+    "Я учебный помощник группы <b>ИУ7-13Б</b>.\n"
+    "📅 Расписание на день и неделю\n"
+    "📝 Обычное и стендовое ДЗ\n"
+    "✅ Личный архив выполненного\n"
+    "📖 Учебные материалы по предметам\n\n"
+    "После регистрации все разделы доступны через кнопки меню.\n\n"
+)
 
 def parse_number(text, maximum):
     if text.isascii() and text.isdigit():
@@ -54,13 +65,13 @@ def create_router(db, config, schedule):
             if not user:
                 db.set_username(message.from_user.id, message.from_user.username)
 
-    async def prompt(message):
+    async def prompt(message, welcome=False):
         user = db.user(message.from_user.id)
-        if not user:
-            await message.answer("Привет! Я учебный бот группы ИУ7-13Б \n"
-                                 "Здесь можно смотреть расписание и домашку.\n\n"
-                                 "Отправь персональный код приглашения, полученный у владельца бота.",
-                                 reply_markup=ReplyKeyboardRemove())
+        if not user or (welcome and not user["name"]):
+            instruction = ("Давай познакомимся! Введи имя и фамилию." if user else
+                           "Для первого входа отправь персональный код приглашения от владельца бота.")
+            await message.answer_photo(photo=FSInputFile(WELCOME_IMAGE), caption=WELCOME_TEXT + instruction,
+                                       reply_markup=ReplyKeyboardRemove())
         elif not user["name"]:
             await message.answer("Как тебя зовут? Введи имя и фамилию.", reply_markup=ReplyKeyboardRemove())
         elif not user["journal_number"]:
@@ -81,12 +92,17 @@ def create_router(db, config, schedule):
     @router.message(Command("cancel"))
     @router.message(F.text.in_({HOME, CANCEL}))
     async def start(message: Message):
+        if message.text == CANCEL and db.feedback_pending(message.from_user.id):
+            db.cancel_feedback(message.from_user.id)
+            await nav.show(message, message.from_user.id, "feedback", "Отправка предложения отменена.")
+            return
+        first_visit = db.user(message.from_user.id) is None
         if message.text == CANCEL or (message.text and message.text.split()[0].split('@')[0] == "/cancel"):
             db.clear_draft(message.from_user.id)
             await message.answer("Черновик ДЗ отменён.")
         if message.from_user.id == config.owner_id:
             db.add_owner(config.owner_id)
-        await prompt(message)
+        await prompt(message, welcome=first_visit)
 
     @router.callback_query(F.data == "nav:main")
     async def main_menu(query):
@@ -160,6 +176,7 @@ def create_router(db, config, schedule):
             await message.answer("Пока никто не зарегистрировался.")
             return
         entries = []
+        controls = []
         for user in members:
             number = user["journal_number"] or "—"
             name = escape(user["name"] or "Имя не указано")
@@ -168,7 +185,69 @@ def create_router(db, config, schedule):
             username = f"@{escape(user['username'])}" if user["username"] else "не указан"
             entries.append(f"<b>№ {number} · {name}</b>\nUsername: {username}\n"
                            f"ID: <code>{user['telegram_id']}</code> · {role}{status}")
+            if user["telegram_id"] != config.owner_id:
+                controls.append([InlineKeyboardButton(
+                    text=f"🗑 № {number} · {user['name'] or 'Без имени'}"[:64],
+                    callback_data=f"group:remove:{user['telegram_id']}",
+                )])
         await send_day(message, "\n\n".join(entries))
+        if controls:
+            await message.answer("<b>Управление участниками</b>\nВыбери, кого удалить из бота:",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=controls))
+
+    @router.callback_query(F.data.startswith("group:remove:"))
+    async def confirm_remove_member(query: CallbackQuery):
+        if query.from_user.id != config.owner_id:
+            await query.answer("Удалять участников может только владелец.", show_alert=True)
+            return
+        try:
+            target_id = int(query.data.rsplit(":", 1)[1])
+        except ValueError:
+            await query.answer("Кнопка недоступна.")
+            return
+        member = db.user(target_id)
+        if not member or target_id == config.owner_id:
+            await query.answer("Участник не найден.", show_alert=True)
+            return
+        await query.answer()
+        name = escape(member["name"] or "Имя не указано")
+        number = member["journal_number"] or "—"
+        await query.message.answer(
+            f"Удалить <b>№ {number} · {name}</b> из бота?\n\n"
+            "Его личные отметки и незавершённый черновик будут удалены. "
+            "Для повторного входа понадобится новое приглашение.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Да, удалить", callback_data=f"group:remove_yes:{target_id}"),
+                InlineKeyboardButton(text="Отмена", callback_data="group:remove_cancel"),
+            ]]),
+        )
+
+    @router.callback_query(F.data == "group:remove_cancel")
+    async def cancel_remove_member(query: CallbackQuery):
+        if query.from_user.id != config.owner_id:
+            await query.answer("Действие доступно только владельцу.", show_alert=True)
+            return
+        await query.answer("Удаление отменено")
+        await query.message.edit_text("Удаление участника отменено.")
+
+    @router.callback_query(F.data.startswith("group:remove_yes:"))
+    async def remove_member(query: CallbackQuery):
+        if query.from_user.id != config.owner_id:
+            await query.answer("Удалять участников может только владелец.", show_alert=True)
+            return
+        try:
+            target_id = int(query.data.rsplit(":", 1)[1])
+        except ValueError:
+            await query.answer("Кнопка недоступна.")
+            return
+        member = db.user(target_id)
+        if not member or not db.remove_user(target_id, config.owner_id):
+            await query.answer("Участник уже удалён или недоступен.", show_alert=True)
+            return
+        await query.answer("Участник удалён")
+        await query.message.edit_text(
+            f"Участник <b>{escape(member['name'] or 'Без имени')}</b> удалён из бота."
+        )
 
     @router.message(Command("edit_profile"))
     @router.message(F.text == EDIT_PROFILE)
@@ -219,6 +298,70 @@ def create_router(db, config, schedule):
                              "Выбери предмет — откроется его папка на Яндекс Диске.\n"
                              "Там можно посмотреть или скачать учебники, конспекты и другие файлы.",
                              reply_markup=materials_keyboard())
+
+    @router.message(F.text == "💡 Предложения и идеи")
+    async def feedback_menu(message: Message):
+        if not ready(message):
+            await prompt(message)
+            return
+        await nav.show(message, message.from_user.id, "feedback",
+                       "<b>Предложения и идеи</b>\n\n"
+                       "Здесь можно предложить новую функцию, улучшение интерфейса или сообщить о проблеме. "
+                       "Сообщение увидит владелец бота.")
+
+    @router.message(F.text == "✍️ Отправить предложение")
+    async def begin_feedback(message: Message):
+        if not ready(message):
+            await prompt(message)
+            return
+        db.start_feedback(message.from_user.id)
+        await nav.show(message, message.from_user.id, "feedback_input",
+                       "Напиши предложение или идею одним сообщением — до 1200 символов.")
+
+    async def awaiting_feedback(message):
+        return db.feedback_pending(message.from_user.id)
+
+    @router.message(awaiting_feedback)
+    async def receive_feedback(message: Message):
+        text = (message.text or "").strip()
+        if not text or text.startswith("/") or len(text) > 1200 or len(escape(text)) > 1800:
+            await message.answer("Отправь идею обычным текстом, не более 1200 символов.")
+            return
+        user = db.user(message.from_user.id)
+        feedback_id = db.add_feedback(message.from_user.id, text)
+        await nav.show(message, message.from_user.id, "feedback",
+                       "Спасибо! Предложение отправлено владельцу ✅")
+        username = f"@{escape(user['username'])}" if user["username"] else "не указан"
+        try:
+            await message.bot.send_message(
+                config.owner_id,
+                f"<b>💡 Новое предложение №{feedback_id}</b>\n"
+                f"От: {escape(user['name'])} · №{user['journal_number']}\n"
+                f"Username: {username}\nID: <code>{user['telegram_id']}</code>\n\n{escape(text)}",
+            )
+        except TelegramAPIError:
+            await message.answer("Предложение сохранено. Владелец увидит его в разделе «📥 Предложения».")
+
+    @router.message(F.text == "📥 Предложения")
+    async def feedback_inbox(message: Message):
+        if message.from_user.id != config.owner_id:
+            await message.answer("Предложения группы доступны только владельцу.")
+            return
+        items = db.feedback_list()
+        await nav.show(message, message.from_user.id, "feedback_inbox",
+                       f"<b>Предложения группы</b>\nВсего показано: {len(items)}")
+        if not items:
+            await message.answer("Предложений пока нет.")
+            return
+        entries = []
+        for item in items:
+            username = f"@{escape(item['username'])}" if item["username"] else "не указан"
+            entries.append(
+                f"<b>№{item['id']} · {escape(item['name'] or 'Удалённый участник')}</b>\n"
+                f"Номер в журнале: {item['journal_number'] or '—'} · Username: {username}\n"
+                f"ID: <code>{item['user_id']}</code> · {item['created_at']}\n\n{escape(item['text'])}"
+            )
+        await send_day(message, "\n\n".join(entries))
 
     @router.message(F.text == "📅 Расписание")
     async def schedule_menu(message: Message):

@@ -48,6 +48,13 @@ class Database:
             CREATE TABLE IF NOT EXISTS profile_edits (
                 user_id INTEGER PRIMARY KEY, name TEXT
             );
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS feedback_inputs (
+                user_id INTEGER PRIMARY KEY
+            );
         """)
         self.ensure_unique_numbers(path)
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(users)")}
@@ -62,6 +69,12 @@ class Database:
                                      ("title", "TEXT NOT NULL DEFAULT ''"), ("due_week", "INTEGER")):
                 if name not in columns:
                     self.conn.execute(f"ALTER TABLE homework ADD COLUMN {name} {definition}")
+            deleted_ids = [row[0] for row in self.conn.execute("SELECT id FROM homework WHERE deleted=1")]
+            if deleted_ids:
+                placeholders = ",".join("?" for _ in deleted_ids)
+                self.conn.execute(f"DELETE FROM homework_done WHERE homework_id IN ({placeholders})", deleted_ids)
+                self.conn.execute(f"DELETE FROM homework_history WHERE homework_id IN ({placeholders})", deleted_ids)
+                self.conn.execute(f"DELETE FROM homework WHERE id IN ({placeholders})", deleted_ids)
 
     def ensure_unique_numbers(self, path):
         duplicates = self.conn.execute("""
@@ -83,6 +96,19 @@ class Database:
             SELECT * FROM users
             ORDER BY journal_number IS NULL, journal_number, name, telegram_id
         """).fetchall()
+
+    def remove_user(self, telegram_id, owner_id):
+        if telegram_id == owner_id or not self.user(telegram_id):
+            return False
+        with self.conn:
+            # Удалённый участник сможет вернуться только по новому приглашению.
+            self.conn.execute("DELETE FROM invitations WHERE used_by=?", (telegram_id,))
+            self.conn.execute("DELETE FROM homework_done WHERE user_id=?", (telegram_id,))
+            self.conn.execute("DELETE FROM homework_drafts WHERE user_id=?", (telegram_id,))
+            self.conn.execute("DELETE FROM profile_edits WHERE user_id=?", (telegram_id,))
+            self.conn.execute("DELETE FROM feedback_inputs WHERE user_id=?", (telegram_id,))
+            self.conn.execute("DELETE FROM users WHERE telegram_id=?", (telegram_id,))
+        return True
 
     def user(self, telegram_id):
         return self.conn.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
@@ -206,7 +232,8 @@ class Database:
             params = (kind,)
         return [row[0] for row in self.conn.execute(query + " ORDER BY subject", params)]
 
-    def homework_list(self, user_id, subject=None, overdue_at=None, deleted=False, kind=None, done=None):
+    def homework_list(self, user_id, subject=None, overdue_at=None, due_from=None,
+                      deleted=False, kind=None, done=None):
         query = """SELECT h.*, u.name AS author_name,
             EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?) AS done
             FROM homework h LEFT JOIN users u ON u.telegram_id=h.author_id WHERE h.deleted=?"""
@@ -223,6 +250,9 @@ class Database:
         if overdue_at:
             query += " AND h.due_at<? AND NOT EXISTS(SELECT 1 FROM homework_done d WHERE d.homework_id=h.id AND d.user_id=?)"
             params.extend([overdue_at, user_id])
+        if due_from:
+            query += " AND h.due_at>=?"
+            params.append(due_from)
         return self.conn.execute(query + " ORDER BY h.due_at,h.id", params).fetchall()
 
     def publish_homework(self, user_id, owner_id, token):
@@ -249,16 +279,39 @@ class Database:
             self.conn.execute("DELETE FROM homework_drafts WHERE user_id=?", (user_id,))
         return homework_id
 
-    def set_homework_deleted(self, homework_id, user_id, owner_id, deleted):
+    def delete_homework(self, homework_id, user_id, owner_id):
         with self.conn:
-            cursor = self.conn.execute("UPDATE homework SET deleted=?,version=version+1 WHERE id=? "
-                                       "AND deleted<>? AND (author_id=? OR ?=?)",
-                                       (int(deleted), homework_id, int(deleted), user_id, user_id, owner_id))
-            if cursor.rowcount != 1:
+            item = self.conn.execute("SELECT author_id FROM homework WHERE id=?", (homework_id,)).fetchone()
+            if not item or (item["author_id"] != user_id and user_id != owner_id):
                 return False
-            self.conn.execute("INSERT INTO homework_history(homework_id,editor_id,action,payload) VALUES (?,?,?,?)",
-                              (homework_id, user_id, "delete" if deleted else "restore", "{}"))
+            self.conn.execute("DELETE FROM homework_done WHERE homework_id=?", (homework_id,))
+            self.conn.execute("DELETE FROM homework_history WHERE homework_id=?", (homework_id,))
+            self.conn.execute("DELETE FROM homework WHERE id=?", (homework_id,))
         return True
+
+    def start_feedback(self, user_id):
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO feedback_inputs(user_id) VALUES (?)", (user_id,))
+
+    def feedback_pending(self, user_id):
+        return self.conn.execute("SELECT 1 FROM feedback_inputs WHERE user_id=?", (user_id,)).fetchone() is not None
+
+    def cancel_feedback(self, user_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM feedback_inputs WHERE user_id=?", (user_id,))
+
+    def add_feedback(self, user_id, text):
+        with self.conn:
+            cursor = self.conn.execute("INSERT INTO feedback(user_id,text) VALUES (?,?)", (user_id, text))
+            self.conn.execute("DELETE FROM feedback_inputs WHERE user_id=?", (user_id,))
+        return cursor.lastrowid
+
+    def feedback_list(self, limit=30):
+        return self.conn.execute("""
+            SELECT f.*,u.name,u.username,u.journal_number
+            FROM feedback f LEFT JOIN users u ON u.telegram_id=f.user_id
+            ORDER BY f.id DESC LIMIT ?
+        """, (limit,)).fetchall()
 
     def toggle_homework_done(self, homework_id, user_id):
         with self.conn:
