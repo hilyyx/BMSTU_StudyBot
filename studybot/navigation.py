@@ -34,7 +34,7 @@ class Navigation:
             if user_id == self.owner_id:
                 rows.append(["👥 Моя группа"])
             return reply_keyboard(rows)
-        profile_rows = [[EDIT_PROFILE], ["📨 Бауманская почта"],
+        profile_rows = [[EDIT_PROFILE], ["📨 Бауманская почта", "📊 Успеваемость"],
                         ["🔴 Просроченное", "💡 Предложения и идеи"]]
         if user_id == self.owner_id:
             profile_rows.append(["📥 Предложения"])

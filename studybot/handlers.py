@@ -18,6 +18,7 @@ from .homework import register_homework
 from .navigation import CANCEL, CANCEL_PROFILE, EDIT_PROFILE, HOME, Navigation
 from .materials import materials_keyboard
 from .mail import MailClient, MailLoginError, valid_student_address
+from .performance import LksLoginError, PerformanceClient, render_performance
 
 JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
 WELCOME_IMAGE = Path(__file__).parent / "assets" / "welcome.png"
@@ -57,6 +58,7 @@ def create_router(db, config, schedule, mail_client=None):
     attempts = {}
     nav = Navigation(db, config.owner_id)
     mail_client = mail_client or MailClient(config.mail_host, config.mail_port, config.mail_key)
+    performance_client = PerformanceClient()
 
     @router.message.middleware()
     async def save_username(handler, message, data):
@@ -232,6 +234,35 @@ def create_router(db, config, schedule, mail_client=None):
             await query.message.edit_text("Бауманская почта отключена, данные авторизации удалены.")
         else:
             await query.message.edit_text("Почта осталась подключена.")
+
+    @router.message(F.text == "📊 Успеваемость")
+    async def performance(message: Message):
+        if not ready(message):
+            await prompt(message)
+            return
+        account = db.mail_account(message.from_user.id)
+        if not account:
+            await message.answer(
+                "Сначала подключи Бауманскую почту в профиле. Для почты и личного кабинета "
+                "используется единая учётная запись."
+            )
+            return
+        await message.answer("Загружаю данные из личного кабинета…")
+        try:
+            password = mail_client.decrypt(account["encrypted_password"])
+            progress, sessions = await asyncio.to_thread(
+                performance_client.load, account["address"], password,
+            )
+        except LksLoginError:
+            await message.answer(
+                "Личный кабинет не принял данные учётной записи. Переподключи Бауманскую почту "
+                "в профиле и попробуй снова."
+            )
+            return
+        except (ConnectionError, RuntimeError):
+            await message.answer("Не удалось загрузить успеваемость. Личный кабинет сейчас недоступен.")
+            return
+        await send_day(message, render_performance(progress, sessions))
 
     async def awaiting_mail_setup(message):
         return db.mail_setup(message.from_user.id) is not None
