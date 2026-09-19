@@ -55,6 +55,20 @@ class Database:
             CREATE TABLE IF NOT EXISTS feedback_inputs (
                 user_id INTEGER PRIMARY KEY
             );
+            CREATE TABLE IF NOT EXISTS mail_accounts (
+                user_id INTEGER PRIMARY KEY,
+                address TEXT NOT NULL UNIQUE,
+                encrypted_password TEXT NOT NULL,
+                uid_validity INTEGER,
+                last_uid INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS mail_setups (
+                user_id INTEGER PRIMARY KEY,
+                address TEXT
+            );
         """)
         self.ensure_unique_numbers(path)
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(users)")}
@@ -107,6 +121,8 @@ class Database:
             self.conn.execute("DELETE FROM homework_drafts WHERE user_id=?", (telegram_id,))
             self.conn.execute("DELETE FROM profile_edits WHERE user_id=?", (telegram_id,))
             self.conn.execute("DELETE FROM feedback_inputs WHERE user_id=?", (telegram_id,))
+            self.conn.execute("DELETE FROM mail_setups WHERE user_id=?", (telegram_id,))
+            self.conn.execute("DELETE FROM mail_accounts WHERE user_id=?", (telegram_id,))
             self.conn.execute("DELETE FROM users WHERE telegram_id=?", (telegram_id,))
         return True
 
@@ -312,6 +328,60 @@ class Database:
             FROM feedback f LEFT JOIN users u ON u.telegram_id=f.user_id
             ORDER BY f.id DESC LIMIT ?
         """, (limit,)).fetchall()
+
+    def mail_account(self, user_id):
+        return self.conn.execute("SELECT * FROM mail_accounts WHERE user_id=?", (user_id,)).fetchone()
+
+    def mail_accounts(self):
+        return self.conn.execute("SELECT * FROM mail_accounts ORDER BY user_id").fetchall()
+
+    def start_mail_setup(self, user_id):
+        with self.conn:
+            self.conn.execute("INSERT INTO mail_setups(user_id) VALUES (?) "
+                              "ON CONFLICT(user_id) DO UPDATE SET address=NULL", (user_id,))
+
+    def mail_setup(self, user_id):
+        return self.conn.execute("SELECT * FROM mail_setups WHERE user_id=?", (user_id,)).fetchone()
+
+    def set_mail_setup_address(self, user_id, address):
+        with self.conn:
+            self.conn.execute("UPDATE mail_setups SET address=? WHERE user_id=?", (address, user_id))
+
+    def cancel_mail_setup(self, user_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM mail_setups WHERE user_id=?", (user_id,))
+
+    def save_mail_account(self, user_id, address, encrypted_password, uid_validity, last_uid):
+        try:
+            with self.conn:
+                self.conn.execute("""
+                    INSERT INTO mail_accounts(user_id,address,encrypted_password,uid_validity,last_uid,last_error)
+                    VALUES (?,?,?,?,?,NULL)
+                    ON CONFLICT(user_id) DO UPDATE SET address=excluded.address,
+                        encrypted_password=excluded.encrypted_password,
+                        uid_validity=excluded.uid_validity,last_uid=excluded.last_uid,
+                        last_checked_at=NULL,last_error=NULL
+                """, (user_id, address, encrypted_password, uid_validity, last_uid))
+                self.conn.execute("DELETE FROM mail_setups WHERE user_id=?", (user_id,))
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def update_mail_cursor(self, user_id, uid_validity, last_uid):
+        with self.conn:
+            self.conn.execute("""UPDATE mail_accounts SET uid_validity=?,last_uid=?,
+                last_checked_at=CURRENT_TIMESTAMP,last_error=NULL WHERE user_id=?""",
+                              (uid_validity, last_uid, user_id))
+
+    def set_mail_error(self, user_id, error):
+        with self.conn:
+            self.conn.execute("""UPDATE mail_accounts SET last_checked_at=CURRENT_TIMESTAMP,last_error=?
+                WHERE user_id=?""", (error[:300], user_id))
+
+    def delete_mail_account(self, user_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM mail_setups WHERE user_id=?", (user_id,))
+            return self.conn.execute("DELETE FROM mail_accounts WHERE user_id=?", (user_id,)).rowcount == 1
 
     def toggle_homework_done(self, homework_id, user_id):
         with self.conn:

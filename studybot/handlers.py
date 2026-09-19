@@ -1,4 +1,6 @@
+import asyncio
 import time
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -15,6 +17,7 @@ from .schedule_view import monday_of, schedule_screen
 from .homework import register_homework
 from .navigation import CANCEL, CANCEL_PROFILE, EDIT_PROFILE, HOME, Navigation
 from .materials import materials_keyboard
+from .mail import MailClient, MailLoginError, valid_student_address
 
 JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
 WELCOME_IMAGE = Path(__file__).parent / "assets" / "welcome.png"
@@ -48,11 +51,12 @@ async def send_day(message, text):
         await message.answer(chunk)
 
 
-def create_router(db, config, schedule):
+def create_router(db, config, schedule, mail_client=None):
     router = Router()
     router.message.filter(F.chat.type == ChatType.PRIVATE)
     attempts = {}
     nav = Navigation(db, config.owner_id)
+    mail_client = mail_client or MailClient(config.mail_host, config.mail_port, config.mail_key)
 
     @router.message.middleware()
     async def save_username(handler, message, data):
@@ -95,6 +99,10 @@ def create_router(db, config, schedule):
         if message.text == CANCEL and db.feedback_pending(message.from_user.id):
             db.cancel_feedback(message.from_user.id)
             await nav.show(message, message.from_user.id, "profile", "Отправка предложения отменена.")
+            return
+        if message.text == CANCEL and db.mail_setup(message.from_user.id):
+            db.cancel_mail_setup(message.from_user.id)
+            await nav.show(message, message.from_user.id, "profile", "Подключение почты отменено.")
             return
         first_visit = db.user(message.from_user.id) is None
         if message.text == CANCEL or (message.text and message.text.split()[0].split('@')[0] == "/cancel"):
@@ -155,10 +163,117 @@ def create_router(db, config, schedule):
             await prompt(message)
             return
         user = db.user(message.from_user.id)
+        mail_status = "подключена" if db.mail_account(message.from_user.id) else "не подключена"
         await nav.show(message, message.from_user.id, "profile", f"<b>Твой профиль</b>\nИмя: {escape(user['name'])}\n"
                              f"Группа: ИУ7-13Б\nНомер в журнале / вариант: {user['journal_number']}\n"
                              f"Роль: {'владелец' if user['role'] == 'owner' else 'студент'}\n"
+                             f"Бауманская почта: {mail_status}\n"
                              f"Telegram ID: <code>{user['telegram_id']}</code>")
+
+    @router.message(F.text == "📨 Бауманская почта")
+    async def mail_section(message: Message):
+        if not ready(message):
+            await prompt(message)
+            return
+        if not mail_client.enabled:
+            await nav.show(message, message.from_user.id, "mail",
+                           "Подключение почты пока не настроено на сервере. Обратись к владельцу бота.")
+            return
+        account = db.mail_account(message.from_user.id)
+        if not account:
+            await nav.show(
+                message, message.from_user.id, "mail",
+                "<b>Бауманская почта</b>\n\nПосле подключения бот будет присылать уведомления о новых "
+                "письмах из твоего ящика <code>@student.bmstu.ru</code>. Старые письма отправляться не будут.\n\n"
+                "Пароль хранится на сервере в зашифрованном виде. Его можно удалить кнопкой отключения.",
+            )
+            return
+        status = "работает"
+        if account["last_error"]:
+            status = f"ошибка проверки: {escape(account['last_error'])}"
+        checked = account["last_checked_at"] or "ещё не выполнялась"
+        await nav.show(
+            message, message.from_user.id, "mail_connected",
+            f"<b>Бауманская почта подключена</b>\n"
+            f"Адрес: <code>{escape(account['address'])}</code>\n"
+            f"Состояние: {status}\nПоследняя проверка: {checked} UTC",
+        )
+
+    @router.message(F.text.in_({"🔐 Подключить почту", "🔄 Переподключить почту"}))
+    async def begin_mail_setup(message: Message):
+        if not ready(message):
+            await prompt(message)
+            return
+        if not mail_client.enabled:
+            await message.answer("Подключение почты пока не настроено на сервере.")
+            return
+        db.start_mail_setup(message.from_user.id)
+        await nav.show(message, message.from_user.id, "mail_setup",
+                       "Введи полный адрес Бауманской почты в формате <code>логин@student.bmstu.ru</code>.")
+
+    @router.message(F.text == "🗑 Отключить почту")
+    async def confirm_mail_delete(message: Message):
+        if not db.mail_account(message.from_user.id):
+            await mail_section(message)
+            return
+        await message.answer(
+            "Отключить почту и удалить сохранённые данные авторизации?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Да, отключить", callback_data="mail:delete"),
+                InlineKeyboardButton(text="Отмена", callback_data="mail:keep"),
+            ]]),
+        )
+
+    @router.callback_query(F.data.in_({"mail:delete", "mail:keep"}))
+    async def finish_mail_delete(query: CallbackQuery):
+        await query.answer()
+        if query.data == "mail:delete":
+            db.delete_mail_account(query.from_user.id)
+            await query.message.edit_text("Бауманская почта отключена, данные авторизации удалены.")
+        else:
+            await query.message.edit_text("Почта осталась подключена.")
+
+    async def awaiting_mail_setup(message):
+        return db.mail_setup(message.from_user.id) is not None
+
+    @router.message(awaiting_mail_setup)
+    async def receive_mail_credentials(message: Message):
+        setup = db.mail_setup(message.from_user.id)
+        value = (message.text or "").strip()
+        if not setup["address"]:
+            address = value.lower()
+            if not valid_student_address(address):
+                await message.answer("Введи полный адрес, который заканчивается на <code>@student.bmstu.ru</code>.")
+                return
+            db.set_mail_setup_address(message.from_user.id, address)
+            await message.answer(
+                "Теперь отправь пароль от почты одним сообщением. После проверки бот удалит сообщение с паролем.\n\n"
+                "Пароль нужен для фоновой проверки IMAP. Используй эту функцию только в личном чате с ботом.",
+                reply_markup=nav.keyboard("mail_setup", message.from_user.id),
+            )
+            return
+        with suppress(TelegramAPIError):
+            await message.delete()
+        if not value or len(value) > 300:
+            await message.answer("Пароль пустой или слишком длинный. Отправь его ещё раз.")
+            return
+        await message.answer("Проверяю подключение к почте…")
+        try:
+            validity, latest_uid = await asyncio.to_thread(
+                mail_client.initial_cursor, setup["address"], value,
+            )
+        except MailLoginError:
+            await message.answer("Не удалось войти: проверь адрес и пароль и отправь пароль ещё раз.")
+            return
+        except ConnectionError:
+            await message.answer("Почтовый сервер сейчас недоступен. Попробуй отправить пароль ещё раз позже.")
+            return
+        encrypted = mail_client.encrypt(value)
+        if not db.save_mail_account(message.from_user.id, setup["address"], encrypted, validity, latest_uid):
+            await message.answer("Этот почтовый адрес уже подключён к другому профилю.")
+            return
+        await nav.show(message, message.from_user.id, "mail_connected",
+                       "Бауманская почта подключена ✅\nНовые письма будут приходить сюда.")
 
     @router.message(Command("group"))
     @router.message(F.text == "👥 Моя группа")

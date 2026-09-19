@@ -34,7 +34,8 @@ class Navigation:
             if user_id == self.owner_id:
                 rows.append(["👥 Моя группа"])
             return reply_keyboard(rows)
-        profile_rows = [[EDIT_PROFILE], ["🔴 Просроченное", "💡 Предложения и идеи"]]
+        profile_rows = [[EDIT_PROFILE], ["📨 Бауманская почта"],
+                        ["🔴 Просроченное", "💡 Предложения и идеи"]]
         if user_id == self.owner_id:
             profile_rows.append(["📥 Предложения"])
         profile_rows.append([HOME])
@@ -50,6 +51,10 @@ class Navigation:
             "materials": [[HOME]],
             "feedback_input": [[CANCEL], ["👤 Мой профиль"], [HOME]],
             "feedback_inbox": [["👤 Мой профиль"], ["💡 Предложения и идеи"], [HOME]],
+            "mail": [["🔐 Подключить почту"], ["👤 Мой профиль"], [HOME]],
+            "mail_connected": [["🔄 Переподключить почту", "🗑 Отключить почту"],
+                               ["👤 Мой профиль"], [HOME]],
+            "mail_setup": [[CANCEL], ["👤 Мой профиль"], [HOME]],
             "group": [["🎟 Приглашения"], [HOME]],
             "invitations": [["🎟 Одно приглашение", "🎟 28 приглашений"], ["👥 Моя группа"], [HOME]],
             "draft_content": [[NEXT], [BACK, CANCEL], [HOME]],
@@ -62,6 +67,8 @@ class Navigation:
             self.db.cancel_profile_edit(user_id)
         if section != "feedback_input":
             self.db.cancel_feedback(user_id)
+        if section != "mail_setup":
+            self.db.cancel_mail_setup(user_id)
         self.sections[user_id] = section
         await message.answer(text, reply_markup=self.keyboard(section, user_id))
 

@@ -12,6 +12,7 @@ from aiogram.types import BotCommand
 from .config import Config
 from .database import Database
 from .handlers import create_router
+from .mail import MailClient, MailNotifier
 from .schedule import ScheduleService
 
 
@@ -23,18 +24,24 @@ async def main():
             config.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML)
         ) as bot:
             service = ScheduleService(db, config.group_uuid, session)
+            mail_client = MailClient(config.mail_host, config.mail_port, config.mail_key)
             dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
-            dispatcher.include_router(create_router(db, config, service))
+            dispatcher.include_router(create_router(db, config, service, mail_client))
             await bot.set_my_commands([
                 BotCommand(command="start", description="Открыть главное меню"),
             ])
             refresh = asyncio.create_task(service.refresh_loop())
+            mail = asyncio.create_task(
+                MailNotifier(db, bot, mail_client, config.mail_check_interval).run()
+            )
             try:
                 await dispatcher.start_polling(bot)
             finally:
-                refresh.cancel()
-                with suppress(asyncio.CancelledError):
-                    await refresh
+                for task in (refresh, mail):
+                    task.cancel()
+                for task in (refresh, mail):
+                    with suppress(asyncio.CancelledError):
+                        await task
     finally:
         db.close()
 
