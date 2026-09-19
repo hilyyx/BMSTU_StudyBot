@@ -17,7 +17,7 @@ from .schedule_view import monday_of, schedule_screen
 from .homework import register_homework
 from .navigation import CANCEL, CANCEL_PROFILE, EDIT_PROFILE, HOME, Navigation
 from .materials import materials_keyboard
-from .mail import MailClient, MailLoginError, valid_student_address
+from .mail import MailClient, MailLoginError
 from .performance import LksLoginError, PerformanceClient, render_performance
 
 JOURNAL_PHOTO = Path(__file__).parent / "assets" / "group_journal.jpg"
@@ -186,7 +186,7 @@ def create_router(db, config, schedule, mail_client=None):
             await nav.show(
                 message, message.from_user.id, "mail",
                 "<b>Бауманская почта</b>\n\nПосле подключения бот будет присылать уведомления о новых "
-                "письмах из твоего ящика <code>@student.bmstu.ru</code>. Старые письма отправляться не будут.\n\n"
+                "письмах из твоего ящика. Старые письма отправляться не будут.\n\n"
                 "Пароль хранится на сервере в зашифрованном виде. Его можно удалить кнопкой отключения.",
             )
             return
@@ -211,7 +211,7 @@ def create_router(db, config, schedule, mail_client=None):
             return
         db.start_mail_setup(message.from_user.id)
         await nav.show(message, message.from_user.id, "mail_setup",
-                       "Введи полный адрес Бауманской почты в формате <code>логин@student.bmstu.ru</code>.")
+                       "Введи логин Бауманской учётной записи или полный адрес почты.")
 
     @router.message(F.text == "🗑 Отключить почту")
     async def confirm_mail_delete(message: Message):
@@ -272,10 +272,10 @@ def create_router(db, config, schedule, mail_client=None):
         setup = db.mail_setup(message.from_user.id)
         value = (message.text or "").strip()
         if not setup["address"]:
-            address = value.lower()
-            if not valid_student_address(address):
-                await message.answer("Введи полный адрес, который заканчивается на <code>@student.bmstu.ru</code>.")
+            if not value or len(value) > 254:
+                await message.answer("Введи логин или адрес почты текстом, не более 254 символов.")
                 return
+            address = value.lower()
             db.set_mail_setup_address(message.from_user.id, address)
             await message.answer(
                 "Теперь отправь пароль от почты одним сообщением. После проверки бот удалит сообщение с паролем.\n\n"

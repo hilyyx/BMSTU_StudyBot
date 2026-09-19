@@ -1,7 +1,6 @@
 import asyncio
 import imaplib
 import logging
-import re
 from contextlib import suppress
 from dataclasses import dataclass
 from email import policy
@@ -16,7 +15,6 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 log = logging.getLogger(__name__)
-STUDENT_ADDRESS = re.compile(r"^[^\s@]+@student\.bmstu\.ru$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -30,10 +28,6 @@ class MailMessage:
 
 class MailLoginError(Exception):
     pass
-
-
-def valid_student_address(value):
-    return bool(STUDENT_ADDRESS.fullmatch(value.strip()))
 
 
 def decode_text(value):
