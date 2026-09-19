@@ -56,7 +56,7 @@ class Navigation:
                                ["👤 Мой профиль"], [HOME]],
             "mail_setup": [[CANCEL], ["👤 Мой профиль"], [HOME]],
             "group": [["🎟 Приглашения"], [HOME]],
-            "invitations": [["🎟 Одно приглашение", "🎟 28 приглашений"], ["👥 Моя группа"], [HOME]],
+            "invitations": [["🎟 Одно приглашение", "🎟 30 приглашений"], ["👥 Моя группа"], [HOME]],
             "draft_content": [[NEXT], [BACK, CANCEL], [HOME]],
             "draft": [[BACK, CANCEL], [HOME]],
         }

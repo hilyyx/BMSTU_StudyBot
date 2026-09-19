@@ -130,25 +130,30 @@ def create_router(db, config, schedule, mail_client=None):
         await message.answer(f"Твой Telegram ID: <code>{message.from_user.id}</code>")
 
     @router.message(Command("invite"))
-    @router.message(F.text.in_({"🎟 Одно приглашение", "🎟 28 приглашений"}))
+    @router.message(F.text.in_({"🎟 Одно приглашение", "🎟 30 приглашений"}))
     async def invite(message: Message):
         if message.from_user.id != config.owner_id:
             await message.answer("Создавать приглашения может только владелец.")
             return
-        if message.text in {"🎟 Одно приглашение", "🎟 28 приглашений"}:
-            count = 28 if message.text == "🎟 28 приглашений" else 1
+        if message.text in {"🎟 Одно приглашение", "🎟 30 приглашений"}:
+            count = 30 if message.text == "🎟 30 приглашений" else 1
         else:
             parts = (message.text or "").split()
-            count = 1 if len(parts) == 1 else parse_number(parts[1], 28)
+            count = 1 if len(parts) == 1 else parse_number(parts[1], 30)
             if len(parts) > 2:
                 count = None
         if count is None:
             await message.answer("Выбери число приглашений кнопками в разделе «🎟 Приглашения».")
             return
         codes = db.invitations(count)
+        invitation_lines = (
+            [f"<code>{codes[0]}</code>"] if count == 1
+            else [f"<b>№ {number}</b> — <code>{code}</code>"
+                  for number, code in enumerate(codes, start=1)]
+        )
         await nav.show(message, message.from_user.id, "invitations",
                        "Одноразовые приглашения — отправь каждому студенту отдельный код:\n\n" +
-                       "\n".join(f"<code>{code}</code>" for code in codes))
+                       "\n".join(invitation_lines))
 
     @router.message(F.text == "🎟 Приглашения")
     async def invitations(message: Message):
