@@ -1,6 +1,10 @@
 import asyncio
 import imaplib
 import logging
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from contextlib import suppress
 from dataclasses import dataclass
 from email import policy
@@ -105,6 +109,8 @@ class MailClient:
             raise ConnectionError("Почтовый сервер временно недоступен") from error
 
     def initial_cursor(self, address, password):
+        if self.use_student_web_api(address):
+            return self.ximss_cursor(address, password)
         connection = self.connect(address, password)
         try:
             uid_validity, latest_uid = self.select_cursor(connection)
@@ -127,6 +133,8 @@ class MailClient:
         return uid_validity, max(uids, default=0)
 
     def new_messages(self, address, password, stored_validity, last_uid, limit=20):
+        if self.use_student_web_api(address):
+            return self.ximss_messages(address, password, stored_validity, last_uid, limit)
         connection = self.connect(address, password)
         try:
             uid_validity, latest_uid = self.select_cursor(connection)
@@ -160,6 +168,142 @@ class MailClient:
         finally:
             with suppress(Exception):
                 connection.logout()
+
+    @staticmethod
+    def use_student_web_api(address):
+        return "@" not in address or address.lower().endswith("@student.bmstu.ru")
+
+    @staticmethod
+    def ximss_login(address, password):
+        form = urllib.parse.urlencode({
+            "userName": address,
+            "password": password,
+            "version": "6.1",
+            "errorAsXML": "1",
+        }).encode()
+        request = urllib.request.Request(
+            "https://student.bmstu.ru/ximsslogin/",
+            data=form,
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": "BMSTU-StudyBot/1.0"},
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=20)
+            root = ET.fromstring(response.read())
+        except (urllib.error.URLError, TimeoutError, OSError, ET.ParseError) as error:
+            raise ConnectionError("Студенческий почтовый сервер временно недоступен") from error
+        session = root.find("session")
+        if session is None or not session.get("urlID"):
+            raise MailLoginError("Неверный логин или пароль")
+        return session.get("urlID")
+
+    @staticmethod
+    def ximss_sync(session_id, *operations):
+        root = ET.Element("XIMSS")
+        root.extend(operations)
+        url_id = urllib.parse.quote(session_id, safe="")
+        request = urllib.request.Request(
+            f"https://student.bmstu.ru/Session/{url_id}/sync",
+            data=ET.tostring(root, encoding="utf-8"),
+            headers={"Content-Type": "text/xml", "User-Agent": "BMSTU-StudyBot/1.0"},
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=20)
+            result = ET.fromstring(response.read())
+        except (urllib.error.URLError, TimeoutError, OSError, ET.ParseError) as error:
+            raise ConnectionError("Не удалось получить данные студенческой почты") from error
+        failed = result.find("response[@errorNum]")
+        if failed is not None:
+            raise ConnectionError(failed.get("errorText") or "Ошибка студенческой почты")
+        return result
+
+    @classmethod
+    def ximss_open(cls, session_id):
+        operation = ET.Element("folderOpen", {
+            "id": "open", "folder": "INBOX", "mailbox": "INBOX",
+            "sortField": "UID", "sortOrder": "asc",
+        })
+        for field in ("FLAGS", "From", "Subject"):
+            ET.SubElement(operation, "field").text = field
+        root = cls.ximss_sync(session_id, operation)
+        report = root.find("folderReport[@mode='init']")
+        if report is None:
+            raise ConnectionError("Не удалось открыть входящие письма")
+        validity = int(report.get("UIDValidity") or 0) or None
+        latest_uid = max(0, int(report.get("UIDNext") or 1) - 1)
+        return validity, latest_uid
+
+    @classmethod
+    def ximss_cursor(cls, address, password):
+        session_id = cls.ximss_login(address, password)
+        try:
+            return cls.ximss_open(session_id)
+        finally:
+            with suppress(Exception):
+                cls.ximss_sync(session_id, ET.Element("bye", {"id": "bye"}))
+
+    @classmethod
+    def ximss_messages(cls, address, password, stored_validity, last_uid, limit=20):
+        session_id = cls.ximss_login(address, password)
+        try:
+            validity, latest_uid = cls.ximss_open(session_id)
+            if stored_validity is not None and validity != stored_validity:
+                return validity, latest_uid, []
+            if latest_uid <= last_uid:
+                return validity, latest_uid, []
+            browse = ET.Element("folderBrowse", {"id": "browse", "folder": "INBOX"})
+            ET.SubElement(browse, "UID", {
+                "from": str(last_uid + 1), "till": str(latest_uid),
+            })
+            browsed = cls.ximss_sync(session_id, browse)
+            uids = [
+                int(report.get("UID"))
+                for report in browsed.findall("folderReport")
+                if report.get("UID") and int(report.get("UID")) > last_uid
+            ][:limit]
+            if not uids:
+                return validity, latest_uid, []
+            reads = [
+                ET.Element("folderRead", {
+                    "id": f"read-{uid}", "folder": "INBOX", "UID": str(uid),
+                    "totalSizeLimit": "65536",
+                })
+                for uid in uids
+            ]
+            loaded = cls.ximss_sync(session_id, *reads)
+            messages = []
+            for folder_message in loaded.findall("folderMessage"):
+                email = folder_message.find("EMail")
+                uid = int(folder_message.get("UID") or 0)
+                if email is None or not uid:
+                    continue
+                sender_node = email.find("From")
+                sender = "Неизвестный отправитель"
+                if sender_node is not None:
+                    address_text = (sender_node.text or "").strip()
+                    real_name = sender_node.get("realName")
+                    sender = (f"{real_name} <{address_text}>" if real_name and address_text
+                              else real_name or address_text or sender)
+                subject = (email.findtext("Subject") or "Без темы").strip()
+                plain = next((
+                    (part.text or "").strip()
+                    for part in email.iter("MIME")
+                    if part.get("type") == "text" and part.get("subtype") == "plain" and part.text
+                ), "")
+                preview = " ".join(plain.split())
+                if len(preview) > 700:
+                    preview = preview[:700].rstrip() + "…"
+                attachments = any(
+                    part.get("disposition") == "attachment"
+                    or part.get("Disposition-filename")
+                    or part.get("Type-name")
+                    for part in email.iter("MIME")
+                )
+                messages.append(MailMessage(uid, sender, subject, preview, attachments))
+            return validity, latest_uid, messages
+        finally:
+            with suppress(Exception):
+                cls.ximss_sync(session_id, ET.Element("bye", {"id": "bye"}))
 
 
 class MailNotifier:
