@@ -94,7 +94,7 @@ def create_router(db, config, schedule):
     async def start(message: Message):
         if message.text == CANCEL and db.feedback_pending(message.from_user.id):
             db.cancel_feedback(message.from_user.id)
-            await nav.show(message, message.from_user.id, "feedback", "Отправка предложения отменена.")
+            await nav.show(message, message.from_user.id, "profile", "Отправка предложения отменена.")
             return
         first_visit = db.user(message.from_user.id) is None
         if message.text == CANCEL or (message.text and message.text.split()[0].split('@')[0] == "/cancel"):
@@ -300,23 +300,14 @@ def create_router(db, config, schedule):
                              reply_markup=materials_keyboard())
 
     @router.message(F.text == "💡 Предложения и идеи")
-    async def feedback_menu(message: Message):
-        if not ready(message):
-            await prompt(message)
-            return
-        await nav.show(message, message.from_user.id, "feedback",
-                       "<b>Предложения и идеи</b>\n\n"
-                       "Здесь можно предложить новую функцию, улучшение интерфейса или сообщить о проблеме. "
-                       "Сообщение увидит владелец бота.")
-
-    @router.message(F.text == "✍️ Отправить предложение")
     async def begin_feedback(message: Message):
         if not ready(message):
             await prompt(message)
             return
         db.start_feedback(message.from_user.id)
         await nav.show(message, message.from_user.id, "feedback_input",
-                       "Напиши предложение или идею одним сообщением — до 1200 символов.")
+                       "Напиши предложение, идею или сообщение о проблеме одним текстовым сообщением — до 1200 символов. "
+                       "Его увидит владелец бота.")
 
     async def awaiting_feedback(message):
         return db.feedback_pending(message.from_user.id)
@@ -329,7 +320,7 @@ def create_router(db, config, schedule):
             return
         user = db.user(message.from_user.id)
         feedback_id = db.add_feedback(message.from_user.id, text)
-        await nav.show(message, message.from_user.id, "feedback",
+        await nav.show(message, message.from_user.id, "profile",
                        "Спасибо! Предложение отправлено владельцу ✅")
         username = f"@{escape(user['username'])}" if user["username"] else "не указан"
         try:

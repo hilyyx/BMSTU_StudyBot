@@ -28,26 +28,28 @@ class Navigation:
             rows = [["📅 Расписание"], ["📚 Домашка", "📋 Стендовое ДЗ"],
                     ["📝 Невыполненное", "✅ Выполненное"],
                     ["📖 Учебные материалы"],
-                    ["🔴 Просроченное", "👤 Мой профиль"],
-                    ["💡 Предложения и идеи"]]
+                    ["👤 Мой профиль"]]
             if self.db.draft(user_id):
                 rows.append([RESUME])
             if user_id == self.owner_id:
-                rows.append(["👥 Моя группа", "📥 Предложения"])
+                rows.append(["👥 Моя группа"])
             return reply_keyboard(rows)
+        profile_rows = [[EDIT_PROFILE], ["🔴 Просроченное", "💡 Предложения и идеи"]]
+        if user_id == self.owner_id:
+            profile_rows.append(["📥 Предложения"])
+        profile_rows.append([HOME])
         rows = {
-            "profile": [[EDIT_PROFILE], [HOME]],
+            "profile": profile_rows,
             "edit_profile": [[CANCEL_PROFILE], [HOME]],
             "schedule": [["📅 Сегодня", "📅 Завтра"], ["🗓 Эта неделя", "🗓 Следующая неделя"], [HOME]],
             "regular": [["➕ Добавить ДЗ"], ["📝 Невыполненное", "✅ Выполненное"], [HOME]],
             "stand": [["➕ Добавить стендовое ДЗ"], ["📝 Невыполненное", "✅ Выполненное"], [HOME]],
             "pending": [["✅ Выполненное"], [HOME]],
             "completed": [["📝 Невыполненное"], [HOME]],
-            "overdue": [[HOME]],
+            "overdue": [["👤 Мой профиль"], [HOME]],
             "materials": [[HOME]],
-            "feedback": [["✍️ Отправить предложение"], [HOME]],
-            "feedback_input": [[CANCEL], [HOME]],
-            "feedback_inbox": [["💡 Предложения и идеи"], [HOME]],
+            "feedback_input": [[CANCEL], ["👤 Мой профиль"], [HOME]],
+            "feedback_inbox": [["👤 Мой профиль"], ["💡 Предложения и идеи"], [HOME]],
             "group": [["🎟 Приглашения"], [HOME]],
             "invitations": [["🎟 Одно приглашение", "🎟 28 приглашений"], ["👥 Моя группа"], [HOME]],
             "draft_content": [[NEXT], [BACK, CANCEL], [HOME]],
